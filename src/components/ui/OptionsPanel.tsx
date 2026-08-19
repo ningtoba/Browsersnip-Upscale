@@ -1,5 +1,7 @@
+import { useEffect, useState } from 'react';
 import { useProcessStore } from '@/stores/process-store';
 import { MODELS, TILE_CHOICES } from '@/lib/constants';
+import { supportsFp16 } from '@/lib/engine/session';
 import { usePipeline } from '@/hooks/usePipeline';
 import type { OutputFormat, ScaleOption, TileOption } from '@/types';
 
@@ -30,6 +32,19 @@ export function OptionsPanel() {
   const isProcessing = useProcessStore((s) => s.isProcessing);
   const { startUpscale } = usePipeline();
 
+  // Show the size the user will actually download: fp16 on WebGPU devices
+  // with shader-f16 support, fp32 otherwise.
+  const [fp16Supported, setFp16Supported] = useState<boolean | null>(null);
+  useEffect(() => {
+    let active = true;
+    void supportsFp16().then((ok) => {
+      if (active) setFp16Supported(ok);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const chipClass = (active: boolean) =>
     `doodle-chip ${
       active ? 'doodle-chip-active' : 'doodle-chip-inactive'
@@ -47,10 +62,14 @@ export function OptionsPanel() {
               onClick={() => setOptions({ model: m.id })}
               className={chipClass(options.model === m.id)}
             >
-              {m.label} ({m.sizeMB} MB)
+              {m.label} ({fp16Supported === true ? m.sizeMBFp16 : m.sizeMB}{' '}
+              MB)
             </button>
           ))}
         </div>
+        <p className="text-ink-muted text-[11px]">
+          Models download on first use and are cached by your browser.
+        </p>
       </div>
 
       <div className="space-y-2">

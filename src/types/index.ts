@@ -6,7 +6,7 @@ export type ModelId =
 export type OutputFormat = 'png' | 'jpeg' | 'webp';
 export type ScaleOption = '2' | '3' | '4' | 'custom';
 export type TileOption = 'auto' | '128' | '256' | '512';
-export type PipelinePhase = 'idle' | 'upscaling' | 'postprocessing' | 'done';
+export type PipelinePhase = 'idle' | 'loading-model' | 'upscaling' | 'postprocessing' | 'done';
 
 export interface ImageMetadata {
   width: number;
@@ -40,6 +40,8 @@ export interface ModelConfig {
   description: string;
   url: string;
   sizeMB: number;
+  urlFp16: string;
+  sizeMBFp16: number;
   scale: number;
 }
 

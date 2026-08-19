@@ -31,6 +31,12 @@ are modeled on [Upscayl](https://github.com/upscayl/upscayl); see
 - **Fully client-side inference.** Real-ESRGAN super-resolution runs in the
   browser via ONNX Runtime Web. Primary execution on the WebGPU backend, with
   an automatic WASM fallback for browsers without WebGPU.
+- **Lazy model loading.** Models no longer download at page load — the app
+  renders instantly. The first time a model is used it downloads with live
+  progress in the UI, and the selected model is prefetched in the background
+  as soon as an image is dropped. WebGPU devices with fp16 support
+  (`shader-f16`) download fp16 models (~34 MB General / ~9 MB Anime / ~1.3 MB
+  Anime Fast); everything else uses the fp32 variants.
 - **Privacy by construction.** Images are processed in memory locally. There is
   no upload step and no server to receive one.
 - **Three models** tuned for different content: photos/general, anime, and a
@@ -78,15 +84,18 @@ The models are committed under `public/models/` and are exported 1:1 from the
 canonical weights in the [xinntao/Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN)
 releases by `scripts/export_onnx.py`.
 
-| Model                    | Architecture       | Size   | Use case                  |
-| ------------------------ | ------------------ | ------ | ------------------------- |
-| `realesrgan-x4plus`      | RRDBNet, 23 blocks | 68.7 MB | Photos, general content  |
-| `realesrgan-x4plus-anime` | RRDBNet, 6 blocks | 18.4 MB | Anime, illustrations     |
-| `realesr-animevideov3`   | SRVGGNetCompact    | 2.5 MB  | Fast anime / illustrations |
+| Model                    | Architecture       | Size    | WebGPU (fp16) | Use case                  |
+| ------------------------ | ------------------ | ------- | ------------- | ------------------------- |
+| `realesrgan-x4plus`      | RRDBNet, 23 blocks | 68.7 MB | 32.8 MB       | Photos, general content  |
+| `realesrgan-x4plus-anime` | RRDBNet, 6 blocks | 18.4 MB | 8.8 MB        | Anime, illustrations     |
+| `realesr-animevideov3`   | SRVGGNetCompact    | 2.5 MB  | 1.2 MB        | Fast anime / illustrations |
+
+fp16 variants (roughly half the size) are used on WebGPU devices with fp16
+support (`shader-f16`); everything else uses fp32.
 
 All models share the same contract:
 
-- 4x scale, fp32, ONNX opset 18
+- 4x scale, fp32 or fp16, ONNX opset 18
 - Dynamic input `[1, 3, H, W]` → output `[1, 3, 4H, 4W]`
 - RGB in `[0, 1]`, no normalization
 
@@ -138,8 +147,16 @@ python3 scripts/export_onnx.py --arch srvgg \
     --input realesr-animevideov3.pth --output public/models/realesr-animevideov3.onnx
 ```
 
+fp16 exports for WebGPU users are produced the same way with `--fp16`:
+
+```bash
+python3 scripts/export_onnx.py --arch rrdb  --blocks 23 --fp16 \
+    --input RealESRGAN_x4plus.pth --output public/models/realesrgan-x4plus-fp16.onnx
+```
+
 Each export runs a torch-vs-onnxruntime parity check and fails unless the
-outputs match.
+outputs match. fp16 fidelity is checked against the fp32 export at >45 dB
+PSNR.
 
 ## Project Structure
 
@@ -154,13 +171,12 @@ outputs match.
 │   ├── components/
 │   │   └── ui/                  # UI components
 │   ├── hooks/
-│   │   ├── useONNX.ts           # ONNX Runtime session lifecycle (WebGPU/WASM)
 │   │   └── usePipeline.ts       # Upscale pipeline orchestration
 │   ├── stores/                  # zustand stores
 │   ├── lib/
 │   │   ├── constants.ts         # Models, tile sizes, options
 │   │   ├── engine/
-│   │   │   └── session.ts       # Inference session management
+│   │   │   └── session.ts       # Inference session management (lazy loading, fp16/fp32)
 │   │   └── upscale/
 │   │       ├── preprocess.ts    # Tile extraction, normalization
 │   │       ├── upscale.ts       # Tiled inference, overlap blending, TTA

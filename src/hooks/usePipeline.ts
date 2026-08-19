@@ -10,8 +10,8 @@ import {
   resizeCanvas,
   encodeCanvas,
 } from '@/lib/upscale/postprocess';
-import { getSession, getBackend, hasWebGPU } from '@/lib/engine/session';
-import { MODELS, DEFAULT_TILE, TILE_OVERLAP, PHASE_WEIGHTS } from '@/lib/constants';
+import { getSession, getBackend, hasWebGPU, ensureModel, getDtype } from '@/lib/engine/session';
+import { MODELS, DEFAULT_TILE, TILE_OVERLAP } from '@/lib/constants';
 
 export function usePipeline() {
   const abortRef = useRef<AbortController | null>(null);
@@ -41,6 +41,30 @@ export function usePipeline() {
           ? DEFAULT_TILE[options.model][backend]
           : Number(options.tileSize);
 
+      // Lazy model loading: download on first use (skipped when the session
+      // is already cached, e.g. prefetched by the app shell).
+      if (!getSession(options.model)) {
+        const model = MODELS.find((m) => m.id === options.model) ?? MODELS[0];
+        setPhase('loading-model');
+        appendLog(`Downloading ${model.label} model...`);
+        await ensureModel(options.model, {
+          signal,
+          onProgress: (loaded, total) => {
+            const pct = total > 0 ? (loaded / total) * 100 : 0;
+            updateProgress({
+              phaseDescription: `Downloading ${model.label} model (${(loaded / 1048576).toFixed(1)} / ${(total / 1048576).toFixed(1)} MB)...`,
+              phasePercent: pct,
+              overallPercent: (15 * pct) / 100,
+              detail: `${(loaded / 1048576).toFixed(1)} / ${(total / 1048576).toFixed(1)} MB`,
+            });
+          },
+        });
+        if (signal.aborted) {
+          useProcessStore.getState().reset();
+          return;
+        }
+      }
+
       // Decode the image and fill in metadata if the dropzone/paste path
       // didn't already probe it.
       const decoded = await decodeImageFile(file);
@@ -66,7 +90,7 @@ export function usePipeline() {
 
       const model = MODELS.find((m) => m.id === options.model) ?? MODELS[0];
       setPhase('upscaling');
-      appendLog(`Backend: ${backend} (${tileSize}px tiles, overlap ${TILE_OVERLAP}px)`);
+      appendLog(`Backend: ${backend} (${getDtype(options.model) ?? 'fp32'}, ${tileSize}px tiles, overlap ${TILE_OVERLAP}px)`);
       appendLog(`Model: ${model.label} — upscaling ${w}x${h} → ${w * 4}x${h * 4}`);
 
       const tileCount = Math.ceil(w / tileSize) * Math.ceil(h / tileSize);
@@ -85,7 +109,7 @@ export function usePipeline() {
             updateProgress({
               phaseDescription: 'Upscaling image with AI...',
               phasePercent,
-              overallPercent: (PHASE_WEIGHTS['upscaling'] * phasePercent) / 100,
+              overallPercent: 15 + (75 * phasePercent) / 100,
               detail: `Tile ${Math.floor(done / ttaFactor) + 1}/${tileCount}`,
             });
           },
@@ -97,7 +121,7 @@ export function usePipeline() {
       setPhase('postprocessing');
       updateProgress({
         phasePercent: 0,
-        overallPercent: 0,
+        overallPercent: 90,
         detail: 'Encoding output image...',
       });
 

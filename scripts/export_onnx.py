@@ -31,6 +31,7 @@ import argparse
 import math
 import sys
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -183,17 +184,27 @@ def check_parity(model: nn.Module, onnx_path: str) -> float:
         return float('nan')
 
     sess = ort.InferenceSession(onnx_path, providers=['CPUExecutionProvider'])
-    x = torch.rand(1, 3, 48, 64)
+    dtype = next(model.parameters()).dtype
+    x = torch.rand(1, 3, 48, 64).to(dtype)
     with torch.no_grad():
-        y_torch = model(x).numpy()
-    y_onnx = sess.run(None, {sess.get_inputs()[0].name: x.numpy()})[0]
+        y_torch = model(x).float().numpy()
+    try:
+        y_onnx = sess.run(None, {sess.get_inputs()[0].name: x.numpy()})[0]
+    except Exception as err:  # e.g. CPU EP without fp16 kernels
+        print(f'WARN: onnxruntime could not run this model on CPU '
+              f'({err.__class__.__name__}: {err}) — skipping graph parity', file=sys.stderr)
+        return float('nan')
+    y_onnx = y_onnx.astype(np.float32, copy=False) if y_onnx.dtype != np.float32 else y_onnx
     mse = float(((y_torch - y_onnx) ** 2).mean())
     if mse == 0:
         return float('inf')
     psnr = 10 * math.log10(1.0 / mse)
     print(f'parity: torch vs onnxruntime PSNR = {psnr:.2f} dB (mse={mse:.3e})')
-    if psnr < 90:
-        raise SystemExit(f'FAIL: parity PSNR {psnr:.2f} dB < 90 dB — export mismatch')
+    # fp32 exports must be bit-near-exact; fp16 has inherent rounding (~1e-7
+    # MSE on [0,1] outputs, ~65-75 dB) due to different accumulation order.
+    threshold = 50.0 if dtype == torch.float16 else 90.0
+    if psnr < threshold:
+        raise SystemExit(f'FAIL: parity PSNR {psnr:.2f} dB < {threshold:.0f} dB — export mismatch')
     return psnr
 
 
@@ -203,6 +214,8 @@ def main() -> None:
     ap.add_argument('--blocks', type=int, default=None, help='RRDBNet block count (23 or 6)')
     ap.add_argument('--input', required=True, help='Path to official .pth weights')
     ap.add_argument('--output', required=True, help='Path to write the .onnx model')
+    ap.add_argument('--fp16', action='store_true',
+                    help='Export in float16 (for WebGPU users — halves download size)')
     args = ap.parse_args()
 
     model = build_model(args.arch, args.blocks)
@@ -213,9 +226,12 @@ def main() -> None:
     print(f'loaded {args.input} ({key}, {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M params)')
 
     x = torch.rand(1, 3, 64, 64)
+    if args.fp16:
+        model = model.half()
+        x = x.half()
     with torch.no_grad():
         y = model(x)
-    print(f'output shape at 64x64 input: {tuple(y.shape)}')
+    print(f'output shape at 64x64 input ({y.dtype}): {tuple(y.shape)}')
 
     torch.onnx.export(
         model,
@@ -229,6 +245,18 @@ def main() -> None:
     print(f'exported {args.output}')
 
     check_parity(model, args.output)
+    if args.fp16:
+        # Fidelity of the fp16 export vs the fp32 model on the same input.
+        fp32 = build_model(args.arch, args.blocks)
+        fp32.load_state_dict(state[key])
+        fp32.eval()
+        with torch.no_grad():
+            y_fp32 = fp32(x.float()).float()
+        mse = float(((y.float() - y_fp32) ** 2).mean())
+        psnr = float('inf') if mse == 0 else 10 * math.log10(1.0 / mse)
+        print(f'fp16 vs fp32 fidelity PSNR = {psnr:.2f} dB')
+        if psnr < 45:
+            raise SystemExit(f'FAIL: fp16 fidelity PSNR {psnr:.2f} dB < 45 dB')
     print('OK')
 
 

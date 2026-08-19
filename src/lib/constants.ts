@@ -7,6 +7,8 @@ export const MODELS: ModelConfig[] = [
     description: 'Real-ESRGAN x4plus — 23-block RRDBNet, best quality for photos',
     url: '/models/realesrgan-x4plus.onnx',
     sizeMB: 65.5,
+    urlFp16: '/models/realesrgan-x4plus-fp16.onnx',
+    sizeMBFp16: 32.8,
     scale: 4,
   },
   {
@@ -15,6 +17,8 @@ export const MODELS: ModelConfig[] = [
     description: 'Real-ESRGAN x4plus anime 6B — tuned for illustrations and anime',
     url: '/models/realesrgan-x4plus-anime.onnx',
     sizeMB: 17.5,
+    urlFp16: '/models/realesrgan-x4plus-anime-fp16.onnx',
+    sizeMBFp16: 8.8,
     scale: 4,
   },
   {
@@ -23,6 +27,8 @@ export const MODELS: ModelConfig[] = [
     description: 'Real-ESRGAN animevideov3 — compact, fastest model',
     url: '/models/realesr-animevideov3.onnx',
     sizeMB: 2.4,
+    urlFp16: '/models/realesr-animevideov3-fp16.onnx',
+    sizeMBFp16: 1.2,
     scale: 4,
   },
 ];
@@ -47,13 +53,15 @@ export const TILE_CHOICES: number[] = [128, 256, 512];
 
 export const PHASE_WEIGHTS: Record<PipelinePhase, number> = {
   idle: 0,
-  upscaling: 90,
+  'loading-model': 15,
+  upscaling: 75,
   postprocessing: 10,
   done: 0,
 };
 
 export const PHASE_DESCRIPTIONS: Record<PipelinePhase, string> = {
   idle: '',
+  'loading-model': 'Downloading AI model...',
   upscaling: 'Upscaling image with AI...',
   postprocessing: 'Encoding output image...',
   done: 'Done',

@@ -5,3 +5,4 @@ dist/
 *.tsbuildinfo
 .claude/
 PROJECT_STATUS.md
+__pycache__/

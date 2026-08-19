@@ -2,7 +2,6 @@ import { useEffect } from 'react';
 import { useFileStore } from '@/stores/file-store';
 import { useProcessStore } from '@/stores/process-store';
 import { useUIStore } from '@/stores/ui-store';
-import { LoadingScreen } from '@/components/ui/LoadingScreen';
 import { FileDropZone, handleImageFile } from '@/components/ui/FileDropZone';
 import { ImagePreview } from '@/components/ui/ImagePreview';
 import { OptionsPanel } from '@/components/ui/OptionsPanel';
@@ -11,7 +10,7 @@ import { PhaseIndicator } from '@/components/ui/PhaseIndicator';
 import { OutputActions } from '@/components/ui/OutputActions';
 import { MemoryWarning } from '@/components/ui/MemoryWarning';
 import { LogMonitor } from '@/components/ui/LogMonitor';
-import { useONNX } from '@/hooks/useONNX';
+import { ensureModel, getSession, disposeAll, hasWebGPU } from '@/lib/engine/session';
 import { usePipeline } from '@/hooks/usePipeline';
 
 export default function App() {
@@ -21,8 +20,25 @@ export default function App() {
   const isProcessing = useProcessStore((s) => s.isProcessing);
   const showLogMonitor = useUIStore((s) => s.showLogMonitor);
   const toggleLogMonitor = useUIStore((s) => s.toggleLogMonitor);
-  const { gpuAccelerated, modelsReady, loadingMessage, loadingPercent } = useONNX();
+  const model = useProcessStore((s) => s.options.model);
+  const gpuAccelerated = hasWebGPU();
   const { cancel } = usePipeline();
+
+  // Background prefetch: start the selected model's download as soon as an
+  // image is dropped, while the user still inspects the options.
+  useEffect(() => {
+    if (!file) return;
+    if (getSession(model)) return;
+    void ensureModel(model).catch(() => {});
+  }, [file, model]);
+
+  // Release all inference sessions when the app unmounts.
+  useEffect(
+    () => () => {
+      void disposeAll();
+    },
+    []
+  );
 
   // Clipboard paste support: drop an image straight into the app
   useEffect(() => {
@@ -51,15 +67,6 @@ export default function App() {
     useProcessStore.getState().reset();
     useFileStore.getState().reset();
   };
-
-  if (!modelsReady) {
-    return (
-      <LoadingScreen
-        message={loadingMessage}
-        percent={loadingPercent}
-      />
-    );
-  }
 
   const showOutput = phase === 'done' && outputBlob;
   const showProcessing =
