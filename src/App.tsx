@@ -1,0 +1,151 @@
+import { useEffect } from 'react';
+import { useFileStore } from '@/stores/file-store';
+import { useProcessStore } from '@/stores/process-store';
+import { useUIStore } from '@/stores/ui-store';
+import { LoadingScreen } from '@/components/ui/LoadingScreen';
+import { FileDropZone, handleImageFile } from '@/components/ui/FileDropZone';
+import { ImagePreview } from '@/components/ui/ImagePreview';
+import { OptionsPanel } from '@/components/ui/OptionsPanel';
+import { ProgressBar } from '@/components/ui/ProgressBar';
+import { PhaseIndicator } from '@/components/ui/PhaseIndicator';
+import { OutputActions } from '@/components/ui/OutputActions';
+import { MemoryWarning } from '@/components/ui/MemoryWarning';
+import { LogMonitor } from '@/components/ui/LogMonitor';
+import { useONNX } from '@/hooks/useONNX';
+import { usePipeline } from '@/hooks/usePipeline';
+
+export default function App() {
+  const file = useFileStore((s) => s.file);
+  const phase = useProcessStore((s) => s.phase);
+  const outputBlob = useProcessStore((s) => s.outputBlob);
+  const isProcessing = useProcessStore((s) => s.isProcessing);
+  const showLogMonitor = useUIStore((s) => s.showLogMonitor);
+  const toggleLogMonitor = useUIStore((s) => s.toggleLogMonitor);
+  const { gpuAccelerated, modelsReady, loadingMessage, loadingPercent } = useONNX();
+  const { cancel } = usePipeline();
+
+  // Clipboard paste support: drop an image straight into the app
+  useEffect(() => {
+    const onPaste = async (e: ClipboardEvent) => {
+      if (useFileStore.getState().file) return;
+      const item = e.clipboardData?.files?.[0];
+      if (!item) return;
+      if (!item.type.startsWith('image/')) return;
+      try {
+        await handleImageFile(item);
+      } catch {
+        // ignore invalid pastes
+      }
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, []);
+
+  const handleReset = () => {
+    if (isProcessing) return;
+    cancel();
+    // Revoke any output URLs to free memory
+    const outputUrl = useProcessStore.getState().outputUrl;
+    if (outputUrl) URL.revokeObjectURL(outputUrl);
+    // Reset all stores
+    useProcessStore.getState().reset();
+    useFileStore.getState().reset();
+  };
+
+  if (!modelsReady) {
+    return (
+      <LoadingScreen
+        message={loadingMessage}
+        percent={loadingPercent}
+      />
+    );
+  }
+
+  const showOutput = phase === 'done' && outputBlob;
+  const showProcessing =
+    isProcessing || (phase !== 'idle' && phase !== 'done');
+
+  return (
+    <div className="flex flex-col h-screen-safe">
+      <header className="h-[44px] shrink-0 flex items-center justify-between px-4 border-b border-cream-border bg-glass z-20">
+        <div className="flex items-center gap-3">
+          <a
+            href="https://www.browsersnip.com"
+            className="flex items-center gap-1.5 text-xs text-ink-muted hover:text-ink-soft transition-colors"
+            title="Back to BrowserSnip"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            </svg>
+            <span className="hidden sm:inline">BrowserSnip</span>
+          </a>
+          <span className="text-cream-border">|</span>
+          <span className="text-sm font-semibold tracking-wide text-ink">
+            Image Upscaler
+          </span>
+          {phase !== 'idle' && phase !== 'done' && (
+            <span className="text-[11px] text-ink-muted hidden sm:inline">
+              {phase.replace(/-/g, ' ')}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          {file && !isProcessing && (
+            <button
+              onClick={handleReset}
+              className="text-xs text-ink-muted hover:text-accent transition-colors"
+              title="Start over with a new image"
+            >
+              New Image
+            </button>
+          )}
+          <button
+            onClick={toggleLogMonitor}
+            className="text-xs text-ink-muted hover:text-ink-soft transition-colors"
+          >
+            {showLogMonitor ? 'Hide Logs' : 'Logs'}
+          </button>
+        </div>
+      </header>
+
+      <main className="flex-1 overflow-y-auto">
+        <div className="max-w-2xl mx-auto px-4 py-6 space-y-6">
+          {!gpuAccelerated && (
+            <div className="rounded-md p-3 text-xs border border-warn/20 bg-warn/5 text-warn animate-slide-up flex items-start gap-2">
+              <svg className="w-4 h-4 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+              </svg>
+              <div>
+                <p className="font-medium">Running on CPU — WebGPU not available</p>
+                <p className="mt-0.5 text-warn/70">
+                  Inference will be 3-6x slower. For best performance, use Chrome 113+ or Edge 113+.
+                </p>
+              </div>
+            </div>
+          )}
+          {!file && <FileDropZone />}
+
+          {file && (
+            <>
+              <MemoryWarning />
+              <ImagePreview />
+
+              {!isProcessing && phase !== 'done' && <OptionsPanel />}
+
+              {showProcessing && (
+                <div className="space-y-3 animate-fade-in">
+                  <PhaseIndicator />
+                  <ProgressBar />
+                </div>
+              )}
+
+              {showOutput && <OutputActions />}
+            </>
+          )}
+        </div>
+      </main>
+
+      {showLogMonitor && <LogMonitor />}
+    </div>
+  );
+}

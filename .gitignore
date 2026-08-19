@@ -1,0 +1,7 @@
+references/
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+.claude/
+PROJECT_STATUS.md
