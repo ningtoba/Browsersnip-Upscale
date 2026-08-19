@@ -40,8 +40,6 @@ export interface ModelConfig {
   description: string;
   url: string;
   sizeMB: number;
-  urlFp16: string;
-  sizeMBFp16: number;
   scale: number;
 }
 

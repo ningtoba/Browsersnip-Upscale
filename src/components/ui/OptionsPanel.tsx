@@ -1,7 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useFileStore } from '@/stores/file-store';
 import { useProcessStore } from '@/stores/process-store';
 import { MODELS, TILE_CHOICES } from '@/lib/constants';
-import { supportsFp16 } from '@/lib/engine/client';
 import { usePipeline } from '@/hooks/usePipeline';
 import type { OutputFormat, ScaleOption, TileOption } from '@/types';
 
@@ -32,18 +31,9 @@ export function OptionsPanel() {
   const isProcessing = useProcessStore((s) => s.isProcessing);
   const { startUpscale } = usePipeline();
 
-  // Show the size the user will actually download: fp16 on WebGPU devices
-  // with shader-f16 support, fp32 otherwise.
-  const [fp16Supported, setFp16Supported] = useState<boolean | null>(null);
-  useEffect(() => {
-    let active = true;
-    void supportsFp16().then((ok) => {
-      if (active) setFp16Supported(ok);
-    });
-    return () => {
-      active = false;
-    };
-  }, []);
+  // Hint for very large inputs: CPU-bound WASM inference takes a while.
+  const metadata = useFileStore((s) => s.metadata);
+  const isLargeImage = (metadata?.width ?? 0) * (metadata?.height ?? 0) > 8000000;
 
   const chipClass = (active: boolean) =>
     `doodle-chip ${
@@ -62,11 +52,16 @@ export function OptionsPanel() {
               onClick={() => setOptions({ model: m.id })}
               className={chipClass(options.model === m.id)}
             >
-              {m.label} ({fp16Supported === true ? m.sizeMBFp16 : m.sizeMB}{' '}
-              MB)
+              {m.label} ({m.sizeMB} MB)
             </button>
           ))}
         </div>
+        {isLargeImage && (
+          <p className="text-[10px] text-warn/80">
+            Large image — upscaling is CPU-bound in the browser; expect a longer wait. Anime
+            Fast is the quickest model.
+          </p>
+        )}
         <p className="text-ink-muted text-[11px]">
           Models download on first use and are cached by your browser.
         </p>

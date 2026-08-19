@@ -14,10 +14,10 @@ import {
   ensureModel,
   getBackend,
   getDtype,
-  hasWebGPU,
+  InferenceTimeoutError,
   isModelLoaded,
   runTile,
-  forceWasmFallback,
+  restartWorker,
 } from '@/lib/engine/client';
 import type { UpscaleInput, UpscaleOutput } from '@/types';
 import { MODELS, DEFAULT_TILE, TILE_OVERLAP } from '@/lib/constants';
@@ -61,7 +61,7 @@ export function usePipeline() {
               detail: `${(loaded / 1048576).toFixed(1)} / ${(total / 1048576).toFixed(1)} MB`,
             });
           },
-          // Warm-up status (GPU kernel compilation) overrides the download
+          // Load status (e.g. session ready) overrides the download
           // description while it runs.
           onMessage: (msg) => {
             updateProgress({ phaseDescription: msg });
@@ -73,13 +73,12 @@ export function usePipeline() {
         }
       }
 
-      // Resolve the backend AFTER loading so logs and tile defaults reflect
-      // the session that will actually run (webgpu load may have fallen back
-      // to wasm).
-      const backend = getBackend(options.model) ?? (hasWebGPU() ? 'webgpu' : 'wasm');
+      // Resolve the backend AFTER loading so logs reflect the session that
+      // will actually run (always wasm now).
+      const backend = getBackend(options.model) ?? 'wasm';
       const tileSize =
         options.tileSize === 'auto'
-          ? DEFAULT_TILE[options.model][backend]
+          ? DEFAULT_TILE[options.model]
           : Number(options.tileSize);
 
       // Decode the image and fill in metadata if the dropzone/paste path
@@ -111,8 +110,8 @@ export function usePipeline() {
 
       const input: UpscaleInput = { data: imageData.data, width: w, height: h };
 
-      // Any WebGPU run failure (error or timeout) is retried once on WASM:
-      // terminate the worker, force a WASM reload, restart the tiling.
+      // Any run that hangs (timeout) is retried once on a freshly restarted
+      // engine: terminate the worker, reload, restart the tiling.
       let fellBack = false;
       const runWithFallback = async (): Promise<UpscaleOutput> => {
         try {
@@ -133,19 +132,15 @@ export function usePipeline() {
             run: (chw, h, w) =>
               runTile(options.model, chw, h, w, {
                 signal,
-                timeoutMs: getBackend(options.model) === 'webgpu' ? 60000 : 300000,
+                timeoutMs: 300000,
               }),
           });
         } catch (err) {
-          const isWebGpu = getBackend(options.model) === 'webgpu';
-          if (isWebGpu && !fellBack) {
-            // ANY webgpu run failure (error or timeout) → wasm retry
+          if (err instanceof InferenceTimeoutError && !fellBack) {
             fellBack = true;
-            appendLog(
-              'WebGPU inference failed or timed out — retrying on CPU (WASM). This is slower but reliable.'
-            );
-            forceWasmFallback(options.model);
-            await ensureModel(options.model, { signal }); // respawn + wasm load (browser-cached fetch)
+            appendLog('Inference timed out — restarting the engine and retrying once...');
+            restartWorker();
+            await ensureModel(options.model, { signal }); // respawn + reload (browser-cached fetch)
             if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
             setPhase('upscaling'); // keep progress UI coherent
             return runWithFallback();

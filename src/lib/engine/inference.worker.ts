@@ -1,6 +1,6 @@
 // Dedicated Web Worker: ALL onnxruntime-web code lives here. The main thread
 // never touches ORT directly — it posts plain messages and receives results,
-// so GPU shader compilation and inference can never freeze the UI.
+// so inference can never freeze the UI.
 import * as ort from 'onnxruntime-web';
 import { MODEL_BY_ID } from '@/lib/constants';
 import type { ModelId } from '@/types';
@@ -14,43 +14,25 @@ const scope = self as unknown as {
 };
 
 type InboundMessage =
-  | { type: 'load'; modelId: ModelId; forceWasm?: boolean }
+  | { type: 'load'; modelId: ModelId }
   | { type: 'run'; runId: number; modelId: ModelId; data: ArrayBuffer; h: number; w: number };
 
 interface SessionEntry {
   session: ort.InferenceSession;
-  backend: 'webgpu' | 'wasm';
-  dtype: 'fp16' | 'fp32';
+  backend: 'wasm';
+  dtype: 'fp32';
 }
 
 const sessions = new Map<ModelId, SessionEntry>();
 const loadingModels = new Set<ModelId>();
 
-const threadCount = crossOriginIsolated
-  ? Math.min(4, navigator.hardwareConcurrency || 4)
-  : 1;
+// Single-threaded WASM, like the sibling BrowserSnip-Blurred project: ORT's
+// threaded runtime spawns its own worker scripts that break inside bundled
+// module workers (hangs in session creation, stray worker boot loops). The
+// single-threaded path is battle-tested on every device.
+const threadCount = 1;
 ort.env.wasm.numThreads = threadCount;
-
-// Warm-up inference timeout: if the first WebGPU run (kernel compilation)
-// never settles, fall back to WASM instead of hanging the load forever.
-const WARMUP_TIMEOUT_MS = 60000;
-
-// Cache whether the GPU adapter supports fp16 shaders. Fetching the fp16
-// model without this check wastes ~35 MB on devices without shader-f16
-// (older iGPUs, some virtualized GPUs, SwiftShader).
-let fp16SupportedPromise: Promise<boolean> | null = null;
-function supportsFp16(): Promise<boolean> {
-  fp16SupportedPromise ??= (async () => {
-    try {
-      if (typeof navigator.gpu === 'undefined') return false;
-      const adapter = await navigator.gpu.requestAdapter();
-      return adapter ? adapter.features.has('shader-f16') : false;
-    } catch {
-      return false;
-    }
-  })();
-  return fp16SupportedPromise;
-}
+console.log(`[upscale-worker] boot (threads=${threadCount}, isolated=${crossOriginIsolated})`);
 
 async function fetchModelBuffer(
   url: string,
@@ -105,93 +87,36 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   });
 }
 
-// One dummy inference on a 64x64 input so the WebGPU kernels compile during
-// model loading instead of during the user's first tile.
-async function runWarmUp(session: ort.InferenceSession): Promise<void> {
-  const size = 64;
-  const input = new Float32Array(3 * size * size); // all zeros is fine
-  const tensor = new ort.Tensor('float32', input, [1, 3, size, size]);
-  const feeds: Record<string, ort.Tensor> = { [session.inputNames[0]]: tensor };
-  const results = await session.run(feeds);
-  results[session.outputNames[0]].dispose();
-}
-
-async function createWebGpuSession(
-  buffer: ArrayBuffer,
-  dtype: 'fp16' | 'fp32',
-  modelId: ModelId
-): Promise<SessionEntry | null> {
-  let session: ort.InferenceSession;
-  try {
-    session = await ort.InferenceSession.create(buffer, {
-      executionProviders: ['webgpu'],
-      graphOptimizationLevel: 'all',
-    });
-  } catch {
-    return null;
-  }
-  scope.postMessage({
-    type: 'load-message',
-    modelId,
-    message: 'Preparing GPU kernels (first run compiles shaders)...',
-  });
-  try {
-    await withTimeout(runWarmUp(session), WARMUP_TIMEOUT_MS, 'GPU warm-up timed out');
-  } catch {
-    // GPU unusable (hung or failed kernel) — release and fall back to WASM.
-    void session.release().catch(() => {});
-    return null;
-  }
-  return { session, backend: 'webgpu', dtype };
-}
-
-async function createWasmSession(buffer: ArrayBuffer): Promise<SessionEntry> {
-  const session = await ort.InferenceSession.create(buffer, {
-    executionProviders: ['wasm'],
-    graphOptimizationLevel: 'all',
-    enableCpuMemArena: true,
-    enableMemPattern: true,
-    intraOpNumThreads: threadCount,
-  });
-  return { session, backend: 'wasm', dtype: 'fp32' };
-}
-
-async function loadModel(modelId: ModelId, forceWasm: boolean): Promise<void> {
-  // Dedupe: loads of the same model that are already in flight or complete
-  // are no-ops. Loads of different models serialize via the message queue.
+async function loadModel(modelId: ModelId): Promise<void> {
+  console.log(`[upscale-worker] loadModel start: ${modelId}`);
   if (sessions.has(modelId) || loadingModels.has(modelId)) return;
   loadingModels.add(modelId);
   try {
     const config = MODEL_BY_ID[modelId];
-    let entry: SessionEntry | null = null;
-
-    if (!forceWasm && (await supportsFp16())) {
-      try {
-        const buffer = await fetchModelBuffer(config.urlFp16, (loaded, total) =>
-          scope.postMessage({ type: 'load-progress', modelId, loaded, total })
-        );
-        entry = await createWebGpuSession(buffer, 'fp16', modelId);
-      } catch {
-        // fp16 fetch failed — fall back to fp32 below.
-      }
-    }
-
-    if (!entry) {
-      const buffer = await fetchModelBuffer(config.url, (loaded, total) =>
-        scope.postMessage({ type: 'load-progress', modelId, loaded, total })
-      );
-      if (!forceWasm) {
-        entry = await createWebGpuSession(buffer, 'fp32', modelId);
-      }
-      if (!entry) {
-        entry = await createWasmSession(buffer);
-      }
-    }
-
+    console.log(`[upscale-worker] fetching ${config.url}`);
+    const buffer = await fetchModelBuffer(config.url, (loaded, total) =>
+      scope.postMessage({ type: 'load-progress', modelId, loaded, total })
+    );
+    console.log(`[upscale-worker] fetched ${(buffer.byteLength / 1048576).toFixed(1)} MB — creating wasm session`);
+    // A session-creation hang must surface as a load-error, never stall.
+    const session = await withTimeout(
+      ort.InferenceSession.create(buffer, {
+        executionProviders: ['wasm'],
+        graphOptimizationLevel: 'all',
+        enableCpuMemArena: true,
+        enableMemPattern: true,
+        intraOpNumThreads: threadCount,
+      }),
+      90000,
+      'WASM session creation timed out'
+    );
+    console.log(`[upscale-worker] session ready: ${modelId}`);
+    const entry: SessionEntry = { session, backend: 'wasm', dtype: 'fp32' };
     sessions.set(modelId, entry);
     scope.postMessage({ type: 'load-message', modelId, message: 'Ready' });
     scope.postMessage({ type: 'loaded', modelId, backend: entry.backend, dtype: entry.dtype });
   } catch (err) {
+    console.error(`[upscale-worker] load failed: ${modelId}`, err);
     scope.postMessage({
       type: 'load-error',
       modelId,
@@ -241,8 +166,9 @@ function enqueue(task: () => Promise<void>): void {
 
 scope.onmessage = (event: MessageEvent) => {
   const message = event.data as InboundMessage;
+  console.log(`[upscale-worker] message: ${message.type}${message.type === 'run' ? ` #${message.runId} ${message.w}x${message.h}` : ''}`);
   if (message.type === 'load') {
-    enqueue(() => loadModel(message.modelId, message.forceWasm === true));
+    enqueue(() => loadModel(message.modelId));
   } else if (message.type === 'run') {
     enqueue(() => runOne(message.runId, message.modelId, message.data, message.h, message.w));
   }

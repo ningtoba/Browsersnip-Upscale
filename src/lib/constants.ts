@@ -7,8 +7,6 @@ export const MODELS: ModelConfig[] = [
     description: 'Real-ESRGAN x4plus — 23-block RRDBNet, best quality for photos',
     url: '/models/realesrgan-x4plus.onnx',
     sizeMB: 65.5,
-    urlFp16: '/models/realesrgan-x4plus-fp16.onnx',
-    sizeMBFp16: 32.8,
     scale: 4,
   },
   {
@@ -17,8 +15,6 @@ export const MODELS: ModelConfig[] = [
     description: 'Real-ESRGAN x4plus anime 6B — tuned for illustrations and anime',
     url: '/models/realesrgan-x4plus-anime.onnx',
     sizeMB: 17.5,
-    urlFp16: '/models/realesrgan-x4plus-anime-fp16.onnx',
-    sizeMBFp16: 8.8,
     scale: 4,
   },
   {
@@ -27,8 +23,6 @@ export const MODELS: ModelConfig[] = [
     description: 'Real-ESRGAN animevideov3 — compact, fastest model',
     url: '/models/realesr-animevideov3.onnx',
     sizeMB: 2.4,
-    urlFp16: '/models/realesr-animevideov3-fp16.onnx',
-    sizeMBFp16: 1.2,
     scale: 4,
   },
 ];
@@ -43,10 +37,10 @@ export const MODEL_BY_ID: Record<ModelId, ModelConfig> = MODELS.reduce(
 
 export const TILE_OVERLAP = 12; // input-px overlap between adjacent tiles
 
-export const DEFAULT_TILE: Record<ModelId, { webgpu: number; wasm: number }> = {
-  'realesrgan-x4plus': { webgpu: 256, wasm: 128 },
-  'realesrgan-x4plus-anime': { webgpu: 512, wasm: 256 },
-  'realesr-animevideov3': { webgpu: 512, wasm: 256 },
+export const DEFAULT_TILE: Record<ModelId, number> = {
+  'realesrgan-x4plus': 128,
+  'realesrgan-x4plus-anime': 256,
+  'realesr-animevideov3': 256,
 };
 
 export const TILE_CHOICES: number[] = [128, 256, 512];

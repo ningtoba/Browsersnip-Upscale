@@ -3,7 +3,7 @@
 AI image upscaling, 100% in the browser. BrowserSnip Upscale runs the
 [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) model family locally in
 your browser with [ONNX Runtime Web](https://github.com/microsoft/onnxruntime)
-(WebGPU with a WASM fallback) — your images never leave your machine. No
+(WASM/CPU inference) — your images never leave your machine. No
 uploads, no servers, no accounts.
 
 BrowserSnip Upscale is part of the [BrowserSnip](https://github.com/ningtoba/BrowserSnip)
@@ -29,27 +29,25 @@ are modeled on [Upscayl](https://github.com/upscayl/upscayl); see
 ## Features
 
 - **Fully client-side inference.** Real-ESRGAN super-resolution runs in the
-  browser via ONNX Runtime Web. Primary execution on the WebGPU backend, with
-  an automatic WASM fallback for browsers without WebGPU.
+  browser via ONNX Runtime Web on the WASM (CPU) backend — no GPU required, so
+  it works in every modern browser.
 - **Lazy model loading.** Models no longer download at page load — the app
   renders instantly. The first time a model is used it downloads with live
   progress in the UI, and the selected model is prefetched in the background
-  as soon as an image is dropped. WebGPU devices with fp16 support
-  (`shader-f16`) download fp16 models (~34 MB General / ~9 MB Anime / ~1.3 MB
-  Anime Fast); everything else uses the fp32 variants.
+  as soon as an image is dropped. Models are fp32 only.
 - **Privacy by construction.** Images are processed in memory locally. There is
   no upload step and no server to receive one.
-- **Hang-proof inference.** Inference runs in a dedicated Web Worker, so the
-  UI never freezes during GPU kernel compilation. A warm-up inference compiles
-  the WebGPU shaders while the model loads, and WebGPU runs are timed out and
-  automatically retried on the WASM backend if they fail or hang.
+- **Hang-proof inference.** Inference runs in a dedicated Web Worker with
+  timeouts on every stage — session creation, model loading, and each tile
+  run — so no phase can silently stall. A timed-out run restarts the engine
+  and retries once automatically.
 - **Three models** tuned for different content: photos/general, anime, and a
   fast anime/illustration model (see [Models](#models)).
 - **Tiled inference with overlap blending.** Large images are processed in
   tiles with 12 px overlaps blended by a linear weight ramp, keeping memory
-  usage bounded. Tiles are sized per backend (256 px WebGPU / 128 px WASM for
-  the general model; 512 / 256 for the smaller models), and edge tiles run at
-  their native size thanks to the models' dynamic input shapes.
+  usage bounded. Tiles are sized per model (128 px for the general model;
+  256 px for the smaller models), and edge tiles run at their native size
+  thanks to the models' dynamic input shapes.
 - **Optional TTA (test-time augmentation).** Average the model's output over
   all 8 flip/rotation combinations for higher quality at 8x the inference cost.
 - **Flexible output sizing.** 2x, 3x, or 4x scale, or a custom output width.
@@ -69,7 +67,7 @@ The processing pipeline is:
 2. **Choose a model and options** — model, scale (2x/3x/4x or custom width),
    TTA, output format and quality.
 3. **Tiled inference.** The image is split into overlapping tiles and run
-   through the selected Real-ESRGAN model on the WebGPU (or WASM) backend.
+   through the selected Real-ESRGAN model on the WASM (CPU) backend.
    Tile seams are eliminated by blending the 12 px overlap regions with linear
    weights; edge tiles are inferred at native size via the models' dynamic
    input shapes.
@@ -88,18 +86,15 @@ The models are committed under `public/models/` and are exported 1:1 from the
 canonical weights in the [xinntao/Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN)
 releases by `scripts/export_onnx.py`.
 
-| Model                    | Architecture       | Size    | WebGPU (fp16) | Use case                  |
-| ------------------------ | ------------------ | ------- | ------------- | ------------------------- |
-| `realesrgan-x4plus`      | RRDBNet, 23 blocks | 68.7 MB | 32.8 MB       | Photos, general content  |
-| `realesrgan-x4plus-anime` | RRDBNet, 6 blocks | 18.4 MB | 8.8 MB        | Anime, illustrations     |
-| `realesr-animevideov3`   | SRVGGNetCompact    | 2.5 MB  | 1.2 MB        | Fast anime / illustrations |
-
-fp16 variants (roughly half the size) are used on WebGPU devices with fp16
-support (`shader-f16`); everything else uses fp32.
+| Model                    | Architecture       | Size    | Use case                  |
+| ------------------------ | ------------------ | ------- | ------------------------- |
+| `realesrgan-x4plus`      | RRDBNet, 23 blocks | 68.7 MB | Photos, general content  |
+| `realesrgan-x4plus-anime` | RRDBNet, 6 blocks | 18.4 MB | Anime, illustrations     |
+| `realesr-animevideov3`   | SRVGGNetCompact    | 2.5 MB  | Fast anime / illustrations |
 
 All models share the same contract:
 
-- 4x scale, fp32 or fp16, ONNX opset 18
+- 4x scale, fp32, ONNX opset 18
 - Dynamic input `[1, 3, H, W]` → output `[1, 3, 4H, 4W]`
 - RGB in `[0, 1]`, no normalization
 
@@ -107,13 +102,15 @@ Exports are verified by a torch-vs-onnxruntime parity check (PSNR > 130 dB).
 
 ## Browser Requirements
 
-- **WebGPU-capable browser (Chrome/Edge 113+) is recommended.** Inference runs
-  on the GPU via the WebGPU execution provider.
-- **WASM fallback** works in any modern browser but is 3–6x slower.
-- **Cross-origin isolation** (COOP/COEP) is required for multithreaded WASM and
-  for WebGPU. The app installs `coi-serviceworker.js`, which sets the
-  `Cross-Origin-Opener-Policy` and `Cross-Origin-Embedder-Policy` headers
-  service-worker-side; the Vite dev server also sets the headers directly.
+- **Any modern browser.** Inference runs on the WASM (CPU) execution provider
+  of ONNX Runtime Web — no WebGPU and no GPU hardware are required. WASM runs
+  single-threaded (the same configuration the sibling BrowserSnip Face Blur
+  project ships, for maximum device compatibility).
+- **Cross-origin isolation** (COOP/COEP) is enabled by `coi-serviceworker.js`
+  and the Vite dev server headers; it is not required for single-threaded
+  inference but keeps the door open for faster multithreaded WASM later.
+- **First download ~90 MB** of ONNX models (cached by the browser afterwards),
+  plus the ~13 MB ONNX Runtime WASM build fetched from its CDN.
 
 ## Quick Start
 
@@ -151,16 +148,11 @@ python3 scripts/export_onnx.py --arch srvgg \
     --input realesr-animevideov3.pth --output public/models/realesr-animevideov3.onnx
 ```
 
-fp16 exports for WebGPU users are produced the same way with `--fp16`:
-
-```bash
-python3 scripts/export_onnx.py --arch rrdb  --blocks 23 --fp16 \
-    --input RealESRGAN_x4plus.pth --output public/models/realesrgan-x4plus-fp16.onnx
-```
+The script also supports `--fp16` (half-size WebGPU variants) for future GPU
+work; the app itself runs fp32 only.
 
 Each export runs a torch-vs-onnxruntime parity check and fails unless the
-outputs match. fp16 fidelity is checked against the fp32 export at >45 dB
-PSNR.
+outputs match.
 
 ## Project Structure
 
@@ -180,8 +172,8 @@ PSNR.
 │   ├── lib/
 │   │   ├── constants.ts         # Models, tile sizes, options
 │   │   ├── engine/
-│   │   │   ├── client.ts         # Main-thread inference client (worker lifecycle, run timeouts, WASM fallback)
-│   │   │   └── inference.worker.ts # ONNX Runtime sessions + inference (WebGPU/WASM), runs off the main thread
+│   │   │   ├── client.ts         # Main-thread inference client (worker lifecycle, run timeouts, retry)
+│   │   │   └── inference.worker.ts # Web Worker running onnxruntime-web (WASM)
 │   │   └── upscale/
 │   │       ├── preprocess.ts    # Tile extraction, normalization
 │   │       ├── upscale.ts       # Tiled inference, overlap blending, TTA
@@ -214,9 +206,9 @@ This project explicitly credits its influences:
 - **[Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN)** (xinntao, BSD-3-Clause)
   — the models and weights.
 - **[ONNX Runtime Web](https://github.com/microsoft/onnxruntime)** — the
-  in-browser inference engine (WebGPU / WASM execution providers).
+  in-browser inference engine (WASM execution provider).
 - **[coi-serviceworker](https://github.com/gzuidhof/coi-serviceworker)**
-  (gzuidhof) — cross-origin isolation for multithreaded WASM and WebGPU.
+  (gzuidhof) — cross-origin isolation support.
 - **[BrowserSnip](https://github.com/ningtoba/BrowserSnip)** and
   **BrowserSnip-Blurred** — the design system and architecture of the
   BrowserSnip project family.

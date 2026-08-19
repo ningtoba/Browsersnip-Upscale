@@ -1,6 +1,6 @@
 // Main-thread inference client. Owns the inference Web Worker lifecycle,
-// per-run timeouts, and the WebGPU → WASM fallback policy. No ORT code here —
-// everything onnxruntime-related lives in inference.worker.ts.
+// per-run timeouts, and a load-phase timeout so no stage can stall silently.
+// No ORT code here — everything onnxruntime-related lives in inference.worker.ts.
 import type { ModelId } from '@/types';
 
 export class InferenceTimeoutError extends Error {
@@ -10,8 +10,8 @@ export class InferenceTimeoutError extends Error {
   }
 }
 
-type Backend = 'webgpu' | 'wasm';
-type Dtype = 'fp16' | 'fp32';
+type Backend = 'wasm';
+type Dtype = 'fp32';
 
 export interface LoadedModel {
   backend: Backend;
@@ -29,11 +29,12 @@ interface LoadWaiter {
 interface InFlightLoad {
   modelId: ModelId;
   waiters: Set<LoadWaiter>;
+  timer: ReturnType<typeof setTimeout> | undefined;
 }
 
 interface PendingRun {
   runId: number;
-  timer: ReturnType<typeof setTimeout> | null;
+  timer: ReturnType<typeof setTimeout> | undefined;
   cleanup: () => void;
   resolve: (data: Float32Array) => void;
   reject: (err: unknown) => void;
@@ -50,7 +51,6 @@ type WorkerOutboundMessage =
 
 export interface EnsureModelOptions {
   signal?: AbortSignal;
-  forceWasm?: boolean;
   onProgress?: (loaded: number, total: number) => void;
   onMessage?: (message: string) => void;
 }
@@ -61,36 +61,12 @@ export interface RunTileOptions {
 }
 
 const loadedModels = new Map<ModelId, LoadedModel>();
-// Models marked forceWasm stay on WASM for every future load, even when a
-// later ensureModel call doesn't pass the flag.
-const forceWasmModels = new Map<ModelId, boolean>();
 const pendingLoads = new Map<ModelId, InFlightLoad>();
 const pendingRuns = new Map<number, PendingRun>();
 
 let workerPromise: Promise<Worker> | null = null;
 let workerGeneration = 0;
 let runIdCounter = 0;
-
-export function hasWebGPU(): boolean {
-  return typeof navigator.gpu !== 'undefined';
-}
-
-// Cache whether the GPU adapter supports fp16 shaders. Fetching the fp16
-// model without this check wastes ~35 MB on devices without shader-f16
-// (older iGPUs, some virtualized GPUs, SwiftShader).
-let fp16SupportedPromise: Promise<boolean> | null = null;
-export function supportsFp16(): Promise<boolean> {
-  fp16SupportedPromise ??= (async () => {
-    try {
-      if (typeof navigator.gpu === 'undefined') return false;
-      const adapter = await navigator.gpu.requestAdapter();
-      return adapter ? adapter.features.has('shader-f16') : false;
-    } catch {
-      return false;
-    }
-  })();
-  return fp16SupportedPromise;
-}
 
 export function getBackend(id: ModelId): Backend | null {
   return loadedModels.get(id)?.backend ?? null;
@@ -106,6 +82,7 @@ export function isModelLoaded(id: ModelId): boolean {
 
 function spawnWorker(): Worker {
   const generation = ++workerGeneration;
+  console.log('[upscale-client] spawning inference worker');
   const worker = new Worker(new URL('./inference.worker.ts', import.meta.url), {
     type: 'module',
   });
@@ -129,6 +106,7 @@ function getWorker(): Promise<Worker> {
 
 function rejectLoad(load: InFlightLoad, err: unknown): void {
   pendingLoads.delete(load.modelId);
+  clearTimeout(load.timer);
   for (const waiter of load.waiters) {
     waiter.cleanup();
     waiter.reject(err);
@@ -138,14 +116,14 @@ function rejectLoad(load: InFlightLoad, err: unknown): void {
 
 function rejectRun(run: PendingRun, err: unknown): void {
   pendingRuns.delete(run.runId);
-  if (run.timer !== null) clearTimeout(run.timer);
+  clearTimeout(run.timer);
   run.cleanup();
   run.reject(err);
 }
 
 function resolveRun(run: PendingRun, data: Float32Array): void {
   pendingRuns.delete(run.runId);
-  if (run.timer !== null) clearTimeout(run.timer);
+  clearTimeout(run.timer);
   run.cleanup();
   run.resolve(data);
 }
@@ -155,9 +133,9 @@ function rejectAllPending(err: unknown): void {
   for (const run of [...pendingRuns.values()]) rejectRun(run, err);
 }
 
-// Kill the worker (a run may never settle — terminate instead of waiting),
+// Restart the worker (a run may never settle — terminate instead of waiting),
 // drop every pending operation, and force the next spawn to respawn clean.
-function killWorker(): void {
+export function restartWorker(): void {
   workerGeneration++;
   if (workerPromise) {
     const wp = workerPromise;
@@ -191,6 +169,8 @@ function handleWorkerMessage(message: WorkerOutboundMessage): void {
       const entry: LoadedModel = { backend: message.backend, dtype: message.dtype };
       loadedModels.set(message.modelId, entry);
       pendingLoads.delete(message.modelId);
+      clearTimeout(load.timer);
+      console.log(`[upscale-client] model loaded: ${message.modelId} (${entry.backend} ${entry.dtype})`);
       for (const waiter of load.waiters) {
         waiter.cleanup();
         waiter.resolve(entry);
@@ -201,6 +181,7 @@ function handleWorkerMessage(message: WorkerOutboundMessage): void {
     case 'load-error': {
       const load = pendingLoads.get(message.modelId);
       if (!load) return;
+      console.error(`[upscale-client] model load failed: ${message.modelId} — ${message.message}`);
       rejectLoad(load, new Error(message.message));
       break;
     }
@@ -252,17 +233,26 @@ function joinLoad(
   });
 }
 
+const LOAD_TIMEOUT_MS = 180000;
+
 function beginLoad(id: ModelId, opts?: EnsureModelOptions): Promise<LoadedModel> {
-  const load: InFlightLoad = { modelId: id, waiters: new Set() };
+  const load: InFlightLoad = { modelId: id, waiters: new Set(), timer: undefined };
   pendingLoads.set(id, load);
+
+  // The load phase must never stall silently: if the worker posts neither
+  // 'loaded' nor 'load-error' in time, terminate it, fail every waiter, and
+  // let the next use respawn a fresh worker.
+  load.timer = setTimeout(() => {
+    if (pendingLoads.get(id) !== load) return;
+    rejectLoad(load, new Error('Model load timed out — check your connection or refresh'));
+    restartWorker();
+  }, LOAD_TIMEOUT_MS);
+
   void getWorker().then((worker) => {
     // Superseded (worker terminated while spawning) — a new load was started.
     if (pendingLoads.get(id) !== load) return;
-    worker.postMessage({
-      type: 'load',
-      modelId: id,
-      forceWasm: forceWasmModels.get(id) === true,
-    });
+    console.log(`[upscale-client] posting load: ${id}`);
+    worker.postMessage({ type: 'load', modelId: id });
   }).catch((err) => {
     if (pendingLoads.get(id) === load) rejectLoad(load, err);
   });
@@ -270,7 +260,6 @@ function beginLoad(id: ModelId, opts?: EnsureModelOptions): Promise<LoadedModel>
 }
 
 export function ensureModel(id: ModelId, opts?: EnsureModelOptions): Promise<LoadedModel> {
-  if (opts?.forceWasm) forceWasmModels.set(id, true);
   const cached = loadedModels.get(id);
   if (cached) return Promise.resolve(cached);
 
@@ -287,7 +276,7 @@ export async function runTile(
   w: number,
   opts?: RunTileOptions
 ): Promise<Float32Array> {
-  const timeoutMs = opts?.timeoutMs ?? 60000;
+  const timeoutMs = opts?.timeoutMs ?? 300000;
   const worker = await getWorker();
   const runId = ++runIdCounter;
 
@@ -300,7 +289,7 @@ export async function runTile(
 
     const run: PendingRun = {
       runId,
-      timer: null,
+      timer: undefined,
       cleanup: () => {},
       resolve,
       reject,
@@ -310,10 +299,9 @@ export async function runTile(
     run.timer = setTimeout(() => {
       pendingRuns.delete(runId);
       run.cleanup();
-      forceWasmModels.set(modelId, true);
-      killWorker();
+      restartWorker();
       reject(
-        new InferenceTimeoutError(`WebGPU/CPU inference timed out after ${timeoutMs / 1000}s`)
+        new InferenceTimeoutError(`Inference timed out after ${timeoutMs / 1000}s`)
       );
     }, timeoutMs);
 
@@ -340,13 +328,7 @@ export async function runTile(
   });
 }
 
-export function forceWasmFallback(modelId: ModelId): void {
-  forceWasmModels.set(modelId, true);
-  killWorker();
-}
-
 export function disposeAll(): void {
-  killWorker();
+  restartWorker();
   loadedModels.clear();
-  forceWasmModels.clear();
 }
