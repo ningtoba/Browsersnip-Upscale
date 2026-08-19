@@ -39,6 +39,10 @@ are modeled on [Upscayl](https://github.com/upscayl/upscayl); see
   Anime Fast); everything else uses the fp32 variants.
 - **Privacy by construction.** Images are processed in memory locally. There is
   no upload step and no server to receive one.
+- **Hang-proof inference.** Inference runs in a dedicated Web Worker, so the
+  UI never freezes during GPU kernel compilation. A warm-up inference compiles
+  the WebGPU shaders while the model loads, and WebGPU runs are timed out and
+  automatically retried on the WASM backend if they fail or hang.
 - **Three models** tuned for different content: photos/general, anime, and a
   fast anime/illustration model (see [Models](#models)).
 - **Tiled inference with overlap blending.** Large images are processed in
@@ -176,7 +180,8 @@ PSNR.
 │   ├── lib/
 │   │   ├── constants.ts         # Models, tile sizes, options
 │   │   ├── engine/
-│   │   │   └── session.ts       # Inference session management (lazy loading, fp16/fp32)
+│   │   │   ├── client.ts         # Main-thread inference client (worker lifecycle, run timeouts, WASM fallback)
+│   │   │   └── inference.worker.ts # ONNX Runtime sessions + inference (WebGPU/WASM), runs off the main thread
 │   │   └── upscale/
 │   │       ├── preprocess.ts    # Tile extraction, normalization
 │   │       ├── upscale.ts       # Tiled inference, overlap blending, TTA

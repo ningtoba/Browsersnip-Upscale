@@ -10,7 +10,16 @@ import {
   resizeCanvas,
   encodeCanvas,
 } from '@/lib/upscale/postprocess';
-import { getSession, getBackend, hasWebGPU, ensureModel, getDtype } from '@/lib/engine/session';
+import {
+  ensureModel,
+  getBackend,
+  getDtype,
+  hasWebGPU,
+  isModelLoaded,
+  runTile,
+  forceWasmFallback,
+} from '@/lib/engine/client';
+import type { UpscaleInput, UpscaleOutput } from '@/types';
 import { MODELS, DEFAULT_TILE, TILE_OVERLAP } from '@/lib/constants';
 
 export function usePipeline() {
@@ -35,15 +44,9 @@ export function usePipeline() {
       startProcessing();
       const options = state.options;
 
-      const backend = getBackend(options.model) ?? (hasWebGPU() ? 'webgpu' : 'wasm');
-      const tileSize =
-        options.tileSize === 'auto'
-          ? DEFAULT_TILE[options.model][backend]
-          : Number(options.tileSize);
-
-      // Lazy model loading: download on first use (skipped when the session
+      // Lazy model loading: download on first use (skipped when the model
       // is already cached, e.g. prefetched by the app shell).
-      if (!getSession(options.model)) {
+      if (!isModelLoaded(options.model)) {
         const model = MODELS.find((m) => m.id === options.model) ?? MODELS[0];
         setPhase('loading-model');
         appendLog(`Downloading ${model.label} model...`);
@@ -58,12 +61,26 @@ export function usePipeline() {
               detail: `${(loaded / 1048576).toFixed(1)} / ${(total / 1048576).toFixed(1)} MB`,
             });
           },
+          // Warm-up status (GPU kernel compilation) overrides the download
+          // description while it runs.
+          onMessage: (msg) => {
+            updateProgress({ phaseDescription: msg });
+          },
         });
         if (signal.aborted) {
           useProcessStore.getState().reset();
           return;
         }
       }
+
+      // Resolve the backend AFTER loading so logs and tile defaults reflect
+      // the session that will actually run (webgpu load may have fallen back
+      // to wasm).
+      const backend = getBackend(options.model) ?? (hasWebGPU() ? 'webgpu' : 'wasm');
+      const tileSize =
+        options.tileSize === 'auto'
+          ? DEFAULT_TILE[options.model][backend]
+          : Number(options.tileSize);
 
       // Decode the image and fill in metadata if the dropzone/paste path
       // didn't already probe it.
@@ -83,11 +100,6 @@ export function usePipeline() {
         });
       }
 
-      const session = getSession(options.model);
-      if (!session) {
-        throw new Error('Model session not available — reload the page');
-      }
-
       const model = MODELS.find((m) => m.id === options.model) ?? MODELS[0];
       setPhase('upscaling');
       appendLog(`Backend: ${backend} (${getDtype(options.model) ?? 'fp32'}, ${tileSize}px tiles, overlap ${TILE_OVERLAP}px)`);
@@ -95,26 +107,54 @@ export function usePipeline() {
 
       const tileCount = Math.ceil(w / tileSize) * Math.ceil(h / tileSize);
       const ttaFactor = options.tta ? 8 : 1;
+      appendLog(`Starting inference — ${tileCount} tile(s), TTA ${options.tta ? 'on (8x)' : 'off'}`);
 
-      const result = await upscaleImage(
-        { data: imageData.data, width: w, height: h },
-        session,
-        {
-          tileSize,
-          overlap: TILE_OVERLAP,
-          tta: options.tta,
-          signal,
-          onProgress: (done: number, total: number) => {
-            const phasePercent = (done / total) * 100;
-            updateProgress({
-              phaseDescription: 'Upscaling image with AI...',
-              phasePercent,
-              overallPercent: 15 + (75 * phasePercent) / 100,
-              detail: `Tile ${Math.floor(done / ttaFactor) + 1}/${tileCount}`,
-            });
-          },
+      const input: UpscaleInput = { data: imageData.data, width: w, height: h };
+
+      // Any WebGPU run failure (error or timeout) is retried once on WASM:
+      // terminate the worker, force a WASM reload, restart the tiling.
+      let fellBack = false;
+      const runWithFallback = async (): Promise<UpscaleOutput> => {
+        try {
+          return await upscaleImage(input, {
+            tileSize,
+            overlap: TILE_OVERLAP,
+            tta: options.tta,
+            signal,
+            onProgress: (done: number, total: number) => {
+              const phasePercent = (done / total) * 100;
+              updateProgress({
+                phaseDescription: 'Upscaling image with AI...',
+                phasePercent,
+                overallPercent: 15 + (75 * phasePercent) / 100,
+                detail: `Tile ${Math.floor(done / ttaFactor) + 1}/${tileCount}`,
+              });
+            },
+            run: (chw, h, w) =>
+              runTile(options.model, chw, h, w, {
+                signal,
+                timeoutMs: getBackend(options.model) === 'webgpu' ? 60000 : 300000,
+              }),
+          });
+        } catch (err) {
+          const isWebGpu = getBackend(options.model) === 'webgpu';
+          if (isWebGpu && !fellBack) {
+            // ANY webgpu run failure (error or timeout) → wasm retry
+            fellBack = true;
+            appendLog(
+              'WebGPU inference failed or timed out — retrying on CPU (WASM). This is slower but reliable.'
+            );
+            forceWasmFallback(options.model);
+            await ensureModel(options.model, { signal }); // respawn + wasm load (browser-cached fetch)
+            if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+            setPhase('upscaling'); // keep progress UI coherent
+            return runWithFallback();
+          }
+          throw err;
         }
-      );
+      };
+
+      const result = await runWithFallback();
 
       const outW = result.width;
       const outH = result.height;

@@ -1,4 +1,3 @@
-import * as ort from 'onnxruntime-web';
 import type { UpscaleInput, UpscaleOutput, UpscaleRunOptions } from '@/types';
 import { TILE_OVERLAP } from '@/lib/constants';
 import { extractTileRectCHW } from '@/lib/upscale/preprocess';
@@ -69,8 +68,7 @@ function edgeWeights(len: number, featherPx: number): Float32Array {
 
 export async function upscaleImage(
   input: UpscaleInput,
-  session: ort.InferenceSession,
-  opts: UpscaleRunOptions
+  opts: UpscaleRunOptions & { run: (chw: Float32Array, h: number, w: number) => Promise<Float32Array> }
 ): Promise<UpscaleOutput> {
   if (input.width === 0 || input.height === 0) {
     throw new Error('Cannot upscale an empty image');
@@ -98,21 +96,7 @@ export async function upscaleImage(
   const planeSize = outW * outH;
   const feather = Math.max(1, overlap * MODEL_SCALE);
 
-  const inputName = session.inputNames[0];
-  const outputName = session.outputNames[0];
-
   let done = 0;
-
-  const runModel = async (chw: Float32Array, h: number, w: number): Promise<Float32Array> => {
-    const tensor = new ort.Tensor('float32', chw, [1, CHANNELS, h, w]);
-    const feeds: Record<string, ort.Tensor> = { [inputName]: tensor };
-    const results = await session.run(feeds);
-    const output = results[outputName];
-    // Copy out before dispose — .data may be a CPU view of the tensor.
-    const data = new Float32Array((await output.getData()) as Float32Array);
-    output.dispose();
-    return data;
-  };
 
   const tick = (): void => {
     done++;
@@ -165,7 +149,7 @@ export async function upscaleImage(
       const baseY = y0 * MODEL_SCALE;
 
       if (!tta) {
-        const raw = await runModel(chw, th, tw);
+        const raw = await opts.run(chw, th, tw);
         accumulate(raw, th, tw, wx, wy, baseY, baseX);
         tick();
         continue;
@@ -184,7 +168,7 @@ export async function upscaleImage(
         }
         if (t.f) tIn = flipH(tIn, tH, tW);
 
-        const raw = await runModel(tIn, tH, tW);
+        const raw = await opts.run(tIn, tH, tW);
 
         // Inverse-transform the output back to the tile's orientation:
         // hflip first, then rotate counter-clockwise ((4 - r) cw turns).

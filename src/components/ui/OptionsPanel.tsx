@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useProcessStore } from '@/stores/process-store';
 import { MODELS, TILE_CHOICES } from '@/lib/constants';
-import { supportsFp16 } from '@/lib/engine/session';
+import { supportsFp16 } from '@/lib/engine/client';
 import { usePipeline } from '@/hooks/usePipeline';
 import type { OutputFormat, ScaleOption, TileOption } from '@/types';
 

@@ -10,7 +10,7 @@ import { PhaseIndicator } from '@/components/ui/PhaseIndicator';
 import { OutputActions } from '@/components/ui/OutputActions';
 import { MemoryWarning } from '@/components/ui/MemoryWarning';
 import { LogMonitor } from '@/components/ui/LogMonitor';
-import { ensureModel, getSession, disposeAll, hasWebGPU } from '@/lib/engine/session';
+import { ensureModel, isModelLoaded, disposeAll, hasWebGPU } from '@/lib/engine/client';
 import { usePipeline } from '@/hooks/usePipeline';
 
 export default function App() {
@@ -28,7 +28,7 @@ export default function App() {
   // image is dropped, while the user still inspects the options.
   useEffect(() => {
     if (!file) return;
-    if (getSession(model)) return;
+    if (isModelLoaded(model)) return;
     void ensureModel(model).catch(() => {});
   }, [file, model]);
 
