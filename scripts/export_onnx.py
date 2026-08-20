@@ -212,6 +212,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description='Export Real-ESRGAN weights to ONNX')
     ap.add_argument('--arch', choices=['rrdb', 'srvgg'], required=True)
     ap.add_argument('--blocks', type=int, default=None, help='RRDBNet block count (23 or 6)')
+    ap.add_argument('--num-conv', type=int, default=16, help='SRVGGNetCompact conv count (animevideov3: 16, general-x4v3: 32)')
     ap.add_argument('--input', required=True, help='Path to official .pth weights')
     ap.add_argument('--output', required=True, help='Path to write the .onnx model')
     ap.add_argument('--fp16', action='store_true',
@@ -219,6 +220,9 @@ def main() -> None:
     args = ap.parse_args()
 
     model = build_model(args.arch, args.blocks)
+    if args.arch == 'srvgg':
+        model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64,
+                                num_conv=args.num_conv, upscale=4, act_type='prelu')
     state = torch.load(args.input, map_location='cpu', weights_only=True)
     key = 'params_ema' if 'params_ema' in state else 'params'
     model.load_state_dict(state[key])

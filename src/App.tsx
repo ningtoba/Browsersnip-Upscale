@@ -16,6 +16,7 @@ import { usePipeline } from '@/hooks/usePipeline';
 export default function App() {
   const file = useFileStore((s) => s.file);
   const phase = useProcessStore((s) => s.phase);
+  const error = useProcessStore((s) => s.error);
   const outputBlob = useProcessStore((s) => s.outputBlob);
   const isProcessing = useProcessStore((s) => s.isProcessing);
   const showLogMonitor = useUIStore((s) => s.showLogMonitor);
@@ -116,6 +117,11 @@ export default function App() {
 
       <main className="flex-1 overflow-y-auto">
         <div className="max-w-2xl mx-auto px-4 py-6 space-y-6">
+          {error && (
+            <div className="rounded-md p-3 text-xs border border-danger/20 bg-danger/5 text-danger animate-slide-up">
+              {error}
+            </div>
+          )}
           {!file && <FileDropZone />}
 
           {file && (

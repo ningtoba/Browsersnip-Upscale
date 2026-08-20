@@ -138,6 +138,34 @@ export async function upscaleImage(
     }
   };
 
+  // Bounded-concurrency dispatch: at most `limit` tiles in flight at once,
+  // so the live input/output copies stay bounded while the worker pool is
+  // busy. Each task owns its transform copies (memory is bounded by the
+  // semaphore, not the tile count).
+  const limit = opts.maxConcurrency ?? 2;
+  let active = 0;
+  const waiting: (() => void)[] = [];
+  const acquire = (): Promise<void> =>
+    new Promise((resolve) => {
+      if (active < limit) {
+        active++;
+        resolve();
+      } else {
+        waiting.push(resolve);
+      }
+    });
+  const release = (): void => {
+    active--;
+    const next = waiting.shift();
+    if (next) {
+      active++;
+      next();
+    }
+  };
+
+  let failed = false;
+  const tasks: Promise<void>[] = [];
+
   for (const y0 of ys) {
     for (const x0 of xs) {
       const tw = Math.min(tileSize, input.width - x0);
@@ -149,45 +177,71 @@ export async function upscaleImage(
       const baseY = y0 * MODEL_SCALE;
 
       if (!tta) {
-        const raw = await opts.run(chw, th, tw);
-        accumulate(raw, th, tw, wx, wy, baseY, baseX);
-        tick();
+        tasks.push(
+          acquire().then(async () => {
+            try {
+              if (opts.signal?.aborted || failed) throw new DOMException('Aborted', 'AbortError');
+              const raw = await opts.run(chw, th, tw);
+              accumulate(raw, th, tw, wx, wy, baseY, baseX);
+              tick();
+            } catch (err) {
+              failed = true;
+              throw err;
+            } finally {
+              release();
+            }
+          })
+        );
         continue;
       }
 
       for (const t of TTA_TRANSFORMS) {
-        // Transform the input tile.
-        let tIn = chw;
-        let tH = th;
-        let tW = tw;
-        for (let i = 0; i < t.r; i++) {
-          tIn = rotateCW(tIn, tH, tW);
-          const tmp = tH;
-          tH = tW;
-          tW = tmp;
-        }
-        if (t.f) tIn = flipH(tIn, tH, tW);
+        tasks.push(
+          acquire().then(async () => {
+            try {
+              if (opts.signal?.aborted || failed) throw new DOMException('Aborted', 'AbortError');
+              // Transform the input tile.
+              let tIn = chw;
+              let tH = th;
+              let tW = tw;
+              for (let i = 0; i < t.r; i++) {
+                tIn = rotateCW(tIn, tH, tW);
+                const tmp = tH;
+                tH = tW;
+                tW = tmp;
+              }
+              if (t.f) tIn = flipH(tIn, tH, tW);
 
-        const raw = await opts.run(tIn, tH, tW);
+              const raw = await opts.run(tIn, tH, tW);
 
-        // Inverse-transform the output back to the tile's orientation:
-        // hflip first, then rotate counter-clockwise ((4 - r) cw turns).
-        let tOut = raw;
-        let oH = tH * MODEL_SCALE;
-        let oW = tW * MODEL_SCALE;
-        if (t.f) tOut = flipH(tOut, oH, oW);
-        for (let i = 0; i < (4 - t.r) % 4; i++) {
-          tOut = rotateCW(tOut, oH, oW);
-          const tmp = oH;
-          oH = oW;
-          oW = tmp;
-        }
+              // Inverse-transform the output back to the tile's orientation:
+              // hflip first, then rotate counter-clockwise ((4 - r) cw turns).
+              let tOut = raw;
+              let oH = tH * MODEL_SCALE;
+              let oW = tW * MODEL_SCALE;
+              if (t.f) tOut = flipH(tOut, oH, oW);
+              for (let i = 0; i < (4 - t.r) % 4; i++) {
+                tOut = rotateCW(tOut, oH, oW);
+                const tmp = oH;
+                oH = oW;
+                oW = tmp;
+              }
 
-        accumulate(tOut, th, tw, wx, wy, baseY, baseX);
-        tick();
+              accumulate(tOut, th, tw, wx, wy, baseY, baseX);
+              tick();
+            } catch (err) {
+              failed = true;
+              throw err;
+            } finally {
+              release();
+            }
+          })
+        );
       }
     }
   }
+
+  await Promise.all(tasks);
 
   // Normalize by accumulated weights. Every output pixel is covered by at
   // least one tile (weights > 0), but guard division by zero anyway.

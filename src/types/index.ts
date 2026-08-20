@@ -1,7 +1,8 @@
 export type ModelId =
   | 'realesrgan-x4plus'
   | 'realesrgan-x4plus-anime'
-  | 'realesr-animevideov3';
+  | 'realesr-animevideov3'
+  | 'realesr-general-x4v3';
 
 export type OutputFormat = 'png' | 'jpeg' | 'webp';
 export type ScaleOption = '2' | '3' | '4' | 'custom';
@@ -60,6 +61,8 @@ export interface UpscaleRunOptions {
   tileSize: number;
   overlap?: number;
   tta?: boolean;
+  /** Max tiles in flight concurrently (default 2). */
+  maxConcurrency?: number;
   onProgress?: (done: number, total: number, detail?: string) => void;
   signal?: AbortSignal;
 }

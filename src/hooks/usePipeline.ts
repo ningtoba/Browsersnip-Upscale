@@ -14,6 +14,7 @@ import {
   ensureModel,
   getBackend,
   getDtype,
+  getWorkerCount,
   InferenceTimeoutError,
   isModelLoaded,
   runTile,
@@ -119,6 +120,9 @@ export function usePipeline() {
             tileSize,
             overlap: TILE_OVERLAP,
             tta: options.tta,
+            // ≤2 queued runs per worker: keep the pool saturated without
+            // piling unbounded memory copies.
+            maxConcurrency: getWorkerCount(options.model) * 2,
             signal,
             onProgress: (done: number, total: number) => {
               const phasePercent = (done / total) * 100;

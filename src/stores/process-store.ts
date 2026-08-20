@@ -3,7 +3,7 @@ import type { PipelinePhase, PipelineProgress, UpscaleOptions } from '@/types';
 import { PHASE_DESCRIPTIONS } from '@/lib/constants';
 
 const DEFAULT_OPTIONS: UpscaleOptions = {
-  model: 'realesrgan-x4plus',
+  model: 'realesr-general-x4v3',
   scale: '4',
   customWidth: 0,
   format: 'png',
